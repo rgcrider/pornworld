@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
-import { User, UserRole } from "../types";
+import { User, UserRole, Video, SearchSuggestionVideo, SearchSuggestionTag } from "../types";
+import { SearchSuggestionDropdown } from "./SearchSuggestionDropdown";
 import {
   Play,
   Search,
@@ -8,7 +9,7 @@ import {
   Flame,
   LayoutGrid,
   Shield,
-  Video,
+  Video as VideoIcon,
   Bookmark,
   Clock,
   Settings,
@@ -16,13 +17,15 @@ import {
   Menu,
   X,
   Sparkles,
-  ChevronDown
+  ChevronDown,
+  Loader2
 } from "lucide-react";
 
 interface HeaderProps {
   currentUser: User;
   onNavigate: (view: string, param?: string) => void;
   onSearch: (query: string) => void;
+  onSelectVideo?: (video: Video) => void;
   onSwitchRole: (role: UserRole) => void;
   onOpenUpload: () => void;
   currentView: string;
@@ -32,41 +35,90 @@ export const Header: React.FC<HeaderProps> = ({
   currentUser,
   onNavigate,
   onSearch,
+  onSelectVideo,
   onSwitchRole,
   onOpenUpload,
   currentView,
 }) => {
   const [searchQuery, setSearchQuery] = useState("");
-  const [suggestions, setSuggestions] = useState<string[]>([]);
+  const [videoMatches, setVideoMatches] = useState<SearchSuggestionVideo[]>([]);
+  const [tagMatches, setTagMatches] = useState<SearchSuggestionTag[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
   const [showSuggestions, setShowSuggestions] = useState(false);
+  const [activeIndex, setActiveIndex] = useState(-1);
+  const [recentSearches, setRecentSearches] = useState<string[]>(() => {
+    try {
+      const saved = localStorage.getItem("nexaplay_recent_searches");
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+
   const [showProfileMenu, setShowProfileMenu] = useState(false);
   const [showRoleMenu, setShowRoleMenu] = useState(false);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
   const searchContainerRef = useRef<HTMLDivElement>(null);
+  const mobileSearchContainerRef = useRef<HTMLDivElement>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
 
-  // Fetch search suggestions
+  // Fetch search suggestions in real-time as the user types
   useEffect(() => {
-    if (!searchQuery.trim() || searchQuery.length < 2) {
-      setSuggestions([]);
+    const trimmed = searchQuery.trim();
+    if (!trimmed) {
+      setVideoMatches([]);
+      setTagMatches([]);
+      setIsLoading(false);
+      setActiveIndex(-1);
       return;
     }
+
+    setIsLoading(true);
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
     const timer = setTimeout(() => {
-      fetch(`/api/search/suggestions?q=${encodeURIComponent(searchQuery)}`)
+      fetch(`/api/search/suggestions?q=${encodeURIComponent(trimmed)}`, {
+        signal: controller.signal,
+      })
         .then((res) => res.json())
         .then((data) => {
-          if (Array.isArray(data)) setSuggestions(data);
+          if (data && typeof data === "object") {
+            if (Array.isArray(data)) {
+              setVideoMatches([]);
+              setTagMatches([]);
+            } else {
+              setVideoMatches(Array.isArray(data.videos) ? data.videos : []);
+              setTagMatches(Array.isArray(data.tags) ? data.tags : []);
+            }
+          }
+          setIsLoading(false);
+          setActiveIndex(-1);
         })
-        .catch(() => {});
-    }, 200);
+        .catch((err) => {
+          if (err.name !== "AbortError") {
+            setIsLoading(false);
+          }
+        });
+    }, 160);
 
-    return () => clearTimeout(timer);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
   }, [searchQuery]);
 
   // Click outside to close suggestion dropdown
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
-      if (searchContainerRef.current && !searchContainerRef.current.contains(e.target as Node)) {
+      const target = e.target as Node;
+      const clickedDesktop = searchContainerRef.current?.contains(target);
+      const clickedMobile = mobileSearchContainerRef.current?.contains(target);
+      if (!clickedDesktop && !clickedMobile) {
         setShowSuggestions(false);
       }
     };
@@ -74,18 +126,127 @@ export const Header: React.FC<HeaderProps> = ({
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
+  const addRecentSearch = (term: string) => {
+    const clean = term.trim();
+    if (!clean) return;
+    setRecentSearches((prev) => {
+      const next = [clean, ...prev.filter((item) => item.toLowerCase() !== clean.toLowerCase())].slice(0, 6);
+      try {
+        localStorage.setItem("nexaplay_recent_searches", JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+  };
+
+  const handleRemoveRecentSearch = (e: React.MouseEvent, term: string) => {
+    e.stopPropagation();
+    setRecentSearches((prev) => {
+      const next = prev.filter((item) => item !== term);
+      try {
+        localStorage.setItem("nexaplay_recent_searches", JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+  };
+
+  const handleClearAllRecentSearches = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setRecentSearches([]);
+    try {
+      localStorage.removeItem("nexaplay_recent_searches");
+    } catch {}
+  };
+
   const handleSearchSubmit = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    if (searchQuery.trim()) {
+    const clean = searchQuery.trim();
+    if (clean) {
+      addRecentSearch(clean);
       setShowSuggestions(false);
-      onSearch(searchQuery.trim());
+      setIsMobileMenuOpen(false);
+      onSearch(clean);
     }
   };
 
-  const handleSelectSuggestion = (suggestion: string) => {
-    setSearchQuery(suggestion);
+  const handleSelectVideoMatch = async (videoItem: SearchSuggestionVideo) => {
+    addRecentSearch(videoItem.title);
     setShowSuggestions(false);
-    onSearch(suggestion);
+    setIsMobileMenuOpen(false);
+
+    try {
+      const res = await fetch(`/api/videos/${videoItem.id}`);
+      const data = await res.json();
+      if (data.video && onSelectVideo) {
+        onSelectVideo(data.video);
+        return;
+      }
+    } catch {}
+
+    window.history.replaceState(null, "", `/?v=${videoItem.id}`);
+    onNavigate("watch", videoItem.id);
+  };
+
+  const handleSelectTagMatch = (tagItem: SearchSuggestionTag) => {
+    addRecentSearch(`#${tagItem.tag}`);
+    setSearchQuery(tagItem.tag);
+    setShowSuggestions(false);
+    setIsMobileMenuOpen(false);
+    onSearch(tagItem.tag);
+  };
+
+  const handleSelectRecentSearch = (term: string) => {
+    setSearchQuery(term);
+    setShowSuggestions(false);
+    setIsMobileMenuOpen(false);
+    onSearch(term);
+  };
+
+  // Keyboard navigation for dropdown
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (!showSuggestions) {
+      if (e.key === "ArrowDown") {
+        setShowSuggestions(true);
+      }
+      return;
+    }
+
+    const isQueryEmpty = searchQuery.trim().length === 0;
+    const totalItems = isQueryEmpty
+      ? recentSearches.length
+      : videoMatches.length + tagMatches.length + 1; // +1 for "Search all videos for..." row
+
+    if (totalItems === 0) return;
+
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setActiveIndex((prev) => (prev + 1 >= totalItems ? 0 : prev + 1));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setActiveIndex((prev) => (prev <= 0 ? totalItems - 1 : prev - 1));
+    } else if (e.key === "Enter") {
+      if (activeIndex >= 0) {
+        e.preventDefault();
+        if (isQueryEmpty) {
+          if (recentSearches[activeIndex]) {
+            handleSelectRecentSearch(recentSearches[activeIndex]);
+          }
+        } else {
+          if (activeIndex < videoMatches.length) {
+            handleSelectVideoMatch(videoMatches[activeIndex]);
+          } else if (activeIndex < videoMatches.length + tagMatches.length) {
+            const tagIdx = activeIndex - videoMatches.length;
+            handleSelectTagMatch(tagMatches[tagIdx]);
+          } else {
+            handleSearchSubmit();
+          }
+        }
+      } else {
+        handleSearchSubmit(e);
+      }
+    } else if (e.key === "Escape") {
+      setShowSuggestions(false);
+      setActiveIndex(-1);
+    }
   };
 
   return (
@@ -162,45 +323,70 @@ export const Header: React.FC<HeaderProps> = ({
           </nav>
         </div>
 
-        {/* Center Section: Large Search Bar */}
+        {/* Center Section: Large Search Bar with Dynamic Suggestions */}
         <div ref={searchContainerRef} className="flex-1 max-w-xl relative hidden sm:block">
           <form onSubmit={handleSearchSubmit} className="relative flex items-center">
+            <div className="absolute left-3.5 pointer-events-none text-zinc-500">
+              <Search className="w-4 h-4" />
+            </div>
             <input
               id="header-search-input"
               type="text"
-              placeholder="Search videos, creators, or tags..."
+              placeholder="Search video titles, tags, creators..."
               value={searchQuery}
               onChange={(e) => {
                 setSearchQuery(e.target.value);
                 setShowSuggestions(true);
               }}
               onFocus={() => setShowSuggestions(true)}
-              className="w-full bg-[#1b1b1b] border border-zinc-700/80 focus:border-rose-500 focus:ring-1 focus:ring-rose-500 rounded-full py-2 pl-4 pr-11 text-sm text-zinc-100 placeholder-zinc-500 outline-none transition-all shadow-inner"
+              onKeyDown={handleKeyDown}
+              autoComplete="off"
+              className="w-full bg-[#181818] border border-zinc-700/80 focus:border-rose-500 focus:ring-2 focus:ring-rose-500/20 rounded-full py-2 pl-10 pr-20 text-sm text-zinc-100 placeholder-zinc-500 outline-none transition-all shadow-inner hover:border-zinc-600"
             />
-            <button
-              id="header-search-btn"
-              type="submit"
-              className="absolute right-1.5 p-1.5 text-zinc-400 hover:text-rose-400 transition-colors rounded-full hover:bg-zinc-800"
-              aria-label="Search"
-            >
-              <Search className="w-4 h-4" />
-            </button>
+            <div className="absolute right-2 flex items-center gap-1">
+              {isLoading && (
+                <Loader2 className="w-4 h-4 text-rose-500 animate-spin mr-1" />
+              )}
+              {searchQuery && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSearchQuery("");
+                    setShowSuggestions(true);
+                  }}
+                  className="p-1 text-zinc-500 hover:text-zinc-200 rounded-full hover:bg-zinc-800 transition-colors"
+                  title="Clear search query"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
+              <button
+                id="header-search-btn"
+                type="submit"
+                className="p-1.5 text-zinc-400 hover:text-white transition-colors rounded-full hover:bg-rose-600 hover:text-white"
+                aria-label="Search"
+              >
+                <Search className="w-4 h-4" />
+              </button>
+            </div>
           </form>
 
-          {/* Search Suggestions Popover */}
-          {showSuggestions && suggestions.length > 0 && (
-            <div className="absolute top-11 left-0 right-0 z-50 rounded-xl bg-[#202020] border border-zinc-700 shadow-2xl overflow-hidden py-1">
-              {suggestions.map((item, idx) => (
-                <div
-                  key={idx}
-                  className="px-4 py-2 text-sm text-zinc-200 hover:bg-zinc-700/60 cursor-pointer flex items-center gap-2.5 transition-colors"
-                  onClick={() => handleSelectSuggestion(item)}
-                >
-                  <Search className="w-3.5 h-3.5 text-zinc-400" />
-                  <span className="truncate">{item}</span>
-                </div>
-              ))}
-            </div>
+          {/* Dynamic Search Suggestions Dropdown */}
+          {showSuggestions && (
+            <SearchSuggestionDropdown
+              searchQuery={searchQuery}
+              videoMatches={videoMatches}
+              tagMatches={tagMatches}
+              isLoading={isLoading}
+              activeIndex={activeIndex}
+              recentSearches={recentSearches}
+              onSelectVideo={handleSelectVideoMatch}
+              onSelectTag={handleSelectTagMatch}
+              onSelectRecent={handleSelectRecentSearch}
+              onRemoveRecent={handleRemoveRecentSearch}
+              onClearAllRecent={handleClearAllRecentSearches}
+              onSubmitQuery={handleSearchSubmit}
+            />
           )}
         </div>
 
@@ -326,7 +512,7 @@ export const Header: React.FC<HeaderProps> = ({
                     onClick={() => onNavigate("creator-dashboard")}
                     className="w-full px-3 py-2 text-left rounded-lg hover:bg-zinc-800 flex items-center gap-2.5 text-rose-400 transition-colors"
                   >
-                    <Video className="w-4 h-4" />
+                    <VideoIcon className="w-4 h-4" />
                     <span>Creator Studio</span>
                   </button>
                 )}
@@ -369,19 +555,64 @@ export const Header: React.FC<HeaderProps> = ({
       {/* Mobile Drawer */}
       {isMobileMenuOpen && (
         <div className="md:hidden mt-3 pt-3 border-t border-zinc-800 space-y-2 pb-2">
-          {/* Mobile Search */}
-          <form onSubmit={handleSearchSubmit} className="relative flex items-center mb-3">
-            <input
-              type="text"
-              placeholder="Search videos..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full bg-[#1b1b1b] border border-zinc-700 rounded-full py-2 pl-4 pr-10 text-sm text-zinc-100 placeholder-zinc-500"
-            />
-            <button type="submit" className="absolute right-3 text-zinc-400">
-              <Search className="w-4 h-4" />
-            </button>
-          </form>
+          {/* Mobile Search with Suggestions */}
+          <div ref={mobileSearchContainerRef} className="relative mb-3">
+            <form onSubmit={handleSearchSubmit} className="relative flex items-center">
+              <div className="absolute left-3.5 pointer-events-none text-zinc-500">
+                <Search className="w-4 h-4" />
+              </div>
+              <input
+                type="text"
+                placeholder="Search titles, tags, creators..."
+                value={searchQuery}
+                onChange={(e) => {
+                  setSearchQuery(e.target.value);
+                  setShowSuggestions(true);
+                }}
+                onFocus={() => setShowSuggestions(true)}
+                onKeyDown={handleKeyDown}
+                autoComplete="off"
+                className="w-full bg-[#1b1b1b] border border-zinc-700 rounded-full py-2 pl-10 pr-16 text-sm text-zinc-100 placeholder-zinc-500 focus:border-rose-500 outline-none"
+              />
+              <div className="absolute right-2 flex items-center gap-1">
+                {isLoading && (
+                  <Loader2 className="w-3.5 h-3.5 text-rose-500 animate-spin mr-1" />
+                )}
+                {searchQuery && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSearchQuery("");
+                      setShowSuggestions(true);
+                    }}
+                    className="p-1 text-zinc-500 hover:text-zinc-200"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
+                <button type="submit" className="p-1 text-zinc-400 hover:text-white" aria-label="Search">
+                  <Search className="w-4 h-4" />
+                </button>
+              </div>
+            </form>
+
+            {showSuggestions && (
+              <SearchSuggestionDropdown
+                searchQuery={searchQuery}
+                videoMatches={videoMatches}
+                tagMatches={tagMatches}
+                isLoading={isLoading}
+                activeIndex={activeIndex}
+                recentSearches={recentSearches}
+                onSelectVideo={handleSelectVideoMatch}
+                onSelectTag={handleSelectTagMatch}
+                onSelectRecent={handleSelectRecentSearch}
+                onRemoveRecent={handleRemoveRecentSearch}
+                onClearAllRecent={handleClearAllRecentSearches}
+                onSubmitQuery={handleSearchSubmit}
+              />
+            )}
+          </div>
 
           <div className="grid grid-cols-2 gap-2 text-sm">
             <button

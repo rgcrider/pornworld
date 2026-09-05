@@ -896,43 +896,66 @@ app.post("/api/creators/:id/subscribe", (req: Request, res: Response) => {
   res.json({ subscribed, subscriberCount: creator.subscriberCount });
 });
 
-// Watch History
-app.get("/api/history", (req: Request, res: Response) => {
+// Watch History (supports both /api/history and /api/user/history)
+const getHistoryHandler = (req: Request, res: Response) => {
   res.json(watchHistory);
-});
+};
 
-app.post("/api/history", (req: Request, res: Response) => {
-  const { videoId, lastPositionSec, completed } = req.body;
+const postHistoryHandler = (req: Request, res: Response) => {
+  const { videoId, lastPositionSec, progressSeconds, completed } = req.body;
   const video = videos.find(v => v.id === videoId);
   if (!video) return res.status(404).json({ error: "Video not found" });
 
+  const position = lastPositionSec !== undefined ? Number(lastPositionSec) : (progressSeconds !== undefined ? Number(progressSeconds) : 0);
+  const isDone = completed !== undefined ? !!completed : (video.duration > 0 ? (position / video.duration) >= 0.9 : false);
+
   const existingIdx = watchHistory.findIndex(h => h.videoId === videoId);
   const updatedItem = {
-    id: `hist-${Date.now()}`,
+    id: existingIdx >= 0 ? watchHistory[existingIdx].id : `hist-${Date.now()}`,
     videoId,
     video,
-    lastPositionSec: lastPositionSec || 0,
-    completed: !!completed,
+    lastPositionSec: position,
+    progressSeconds: position,
+    completed: isDone,
     updatedAt: new Date().toISOString()
   };
 
   if (existingIdx >= 0) {
-    watchHistory[existingIdx] = updatedItem;
-  } else {
-    watchHistory.unshift(updatedItem);
+    watchHistory.splice(existingIdx, 1);
   }
+  watchHistory.unshift(updatedItem);
 
-  res.json({ success: true, history: watchHistory });
-});
+  res.json({ success: true, item: updatedItem, history: watchHistory });
+};
 
-app.delete("/api/history/:videoId", (req: Request, res: Response) => {
+const deleteHistoryItemHandler = (req: Request, res: Response) => {
   watchHistory = watchHistory.filter(h => h.videoId !== req.params.videoId);
   res.json({ success: true, history: watchHistory });
-});
+};
 
-app.delete("/api/history", (req: Request, res: Response) => {
+const clearHistoryHandler = (req: Request, res: Response) => {
   watchHistory = [];
   res.json({ success: true });
+};
+
+app.get("/api/history", getHistoryHandler);
+app.get("/api/user/history", getHistoryHandler);
+app.post("/api/history", postHistoryHandler);
+app.post("/api/user/history", postHistoryHandler);
+app.delete("/api/history/:videoId", deleteHistoryItemHandler);
+app.delete("/api/user/history/:videoId", deleteHistoryItemHandler);
+app.delete("/api/history", clearHistoryHandler);
+app.delete("/api/user/history", clearHistoryHandler);
+
+// User Favorites & Subscriptions
+app.get("/api/user/favorites", (req: Request, res: Response) => {
+  const favVideos = videos.filter(v => userFavorites.has(v.id));
+  res.json(favVideos);
+});
+
+app.get("/api/user/subscriptions", (req: Request, res: Response) => {
+  const subbedCreators = creators.filter(c => userSubscriptions.has(c.id));
+  res.json(subbedCreators);
 });
 
 // Playlists
@@ -1070,20 +1093,85 @@ app.get("/api/tags", (req: Request, res: Response) => {
   res.json(sortedTags);
 });
 
-// Search Suggestions
+// Search Suggestions (returns real-time matching video titles and tags)
 app.get("/api/search/suggestions", (req: Request, res: Response) => {
-  const q = (req.query.q as string || "").toLowerCase();
-  if (!q) return res.json([]);
+  const rawQ = (req.query.q as string || "").trim();
+  const q = rawQ.toLowerCase();
 
-  const suggestions = new Set<string>();
-  videos.forEach(v => {
-    if (v.title.toLowerCase().includes(q)) suggestions.add(v.title);
-    v.tags.forEach(t => {
-      if (t.toLowerCase().includes(q)) suggestions.add(t);
+  if (!q) {
+    return res.json({
+      query: "",
+      videos: [],
+      tags: [],
+      suggestions: []
     });
+  }
+
+  // 1. Video Title Matches (matching titles, ranked by startsWith then view count)
+  const matchingVideos = videos
+    .filter(v => v.title.toLowerCase().includes(q))
+    .sort((a, b) => {
+      const aLower = a.title.toLowerCase();
+      const bLower = b.title.toLowerCase();
+      const aStarts = aLower.startsWith(q) ? 1 : 0;
+      const bStarts = bLower.startsWith(q) ? 1 : 0;
+      if (aStarts !== bStarts) return bStarts - aStarts;
+      return b.viewsCount - a.viewsCount;
+    })
+    .slice(0, 5)
+    .map(v => ({
+      id: v.id,
+      title: v.title,
+      thumbnailUrl: v.thumbnailUrl,
+      duration: v.duration,
+      channelName: v.creator ? v.creator.channelName : "Creator",
+      category: v.category,
+      viewsCount: v.viewsCount,
+      isHD: v.isHD,
+      slug: v.slug
+    }));
+
+  // 2. Tag Matches (matching tags, ranked by startsWith then tag frequency)
+  const tagCounts: { [tag: string]: number } = {};
+  videos.forEach(v => {
+    if (Array.isArray(v.tags)) {
+      v.tags.forEach(t => {
+        const tLower = t.toLowerCase();
+        if (tLower.includes(q)) {
+          tagCounts[t] = (tagCounts[t] || 0) + 1;
+        }
+      });
+    }
   });
 
-  res.json(Array.from(suggestions).slice(0, 6));
+  const matchingTags = Object.entries(tagCounts)
+    .map(([tag, count]) => ({ tag, count }))
+    .sort((a, b) => {
+      const aLower = a.tag.toLowerCase();
+      const bLower = b.tag.toLowerCase();
+      const aStarts = aLower.startsWith(q) ? 1 : 0;
+      const bStarts = bLower.startsWith(q) ? 1 : 0;
+      if (aStarts !== bStarts) return bStarts - aStarts;
+      return b.count - a.count;
+    })
+    .slice(0, 6);
+
+  // Flat suggestions for backward compatibility
+  const flatSuggestions = [
+    ...matchingVideos.map(v => v.title),
+    ...matchingTags.map(t => `#${t.tag}`)
+  ];
+
+  if (req.query.format === "flat") {
+    return res.json(flatSuggestions.slice(0, 8));
+  }
+
+  res.json({
+    query: rawQ,
+    videos: matchingVideos,
+    tags: matchingTags,
+    suggestions: flatSuggestions.slice(0, 8)
+  });
 });
 
 // PeerTube Integration & Importer

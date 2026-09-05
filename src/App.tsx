@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from "react";
-import { Video, Category, User, UserRole } from "./types";
+import React, { useState, useEffect, useRef } from "react";
+import { Video, Category, User, UserRole, WatchHistoryItem } from "./types";
 import { Header } from "./components/Header";
 import { Footer } from "./components/Footer";
 import { HomePage } from "./components/HomePage";
@@ -34,11 +34,16 @@ export default function App() {
   const [currentView, setCurrentView] = useState<string>("home");
   const [viewParam, setViewParam] = useState<string | undefined>(undefined);
   const [selectedVideo, setSelectedVideo] = useState<Video | null>(null);
+  const [resumePosition, setResumePosition] = useState<number>(0);
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedCategory, setSelectedCategory] = useState("All");
 
   // User & RBAC State
   const [currentUser, setCurrentUser] = useState<User>(INITIAL_USER);
+
+  // Watch History State & Logic
+  const [watchHistory, setWatchHistory] = useState<WatchHistoryItem[]>([]);
+  const lastSyncTimeRef = useRef<{ [videoId: string]: number }>({});
 
   // Global Video & Category Data
   const [videos, setVideos] = useState<Video[]>([]);
@@ -52,7 +57,7 @@ export default function App() {
   const [reportVideo, setReportVideo] = useState<Video | null>(null);
   const [legalDocType, setLegalDocType] = useState<LegalDocType | null>(null);
 
-  // Initialize data and check age gate
+  // Initialize data, watch history, and check age gate
   useEffect(() => {
     // Check local storage for age verification
     const verified = localStorage.getItem("nexaplay_age_verified");
@@ -60,10 +65,104 @@ export default function App() {
       setIsAgeGateOpen(true);
     }
 
+    // Initialize watch history from localStorage or API
+    const savedHistory = localStorage.getItem("nexaplay_watch_history");
+    if (savedHistory) {
+      try {
+        const parsed = JSON.parse(savedHistory);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          setWatchHistory(parsed);
+        } else {
+          fetchHistoryFromApi();
+        }
+      } catch {
+        fetchHistoryFromApi();
+      }
+    } else {
+      fetchHistoryFromApi();
+    }
+
     // Fetch initial categories and videos
     fetchCategories();
     fetchVideos();
   }, []);
+
+  const fetchHistoryFromApi = async () => {
+    try {
+      const res = await fetch("/api/history");
+      const data = await res.json();
+      if (Array.isArray(data)) {
+        setWatchHistory(data);
+        try {
+          localStorage.setItem("nexaplay_watch_history", JSON.stringify(data));
+        } catch {}
+      }
+    } catch {
+      // ignore
+    }
+  };
+
+  // Watch progress tracker logic
+  const handleUpdateWatchProgress = (video: Video, currentTime: number, duration: number) => {
+    const position = Math.floor(currentTime);
+    const dur = duration || video.duration || 1;
+    const isCompleted = dur > 0 ? (position / dur) >= 0.9 : false;
+
+    setWatchHistory((prev) => {
+      const existing = prev.find((item) => item.videoId === video.id);
+      const updatedItem: WatchHistoryItem = {
+        id: existing ? existing.id : `hist-${Date.now()}`,
+        videoId: video.id,
+        video,
+        lastPositionSec: position,
+        completed: isCompleted,
+        updatedAt: new Date().toISOString(),
+      };
+      const remaining = prev.filter((item) => item.videoId !== video.id);
+      const nextList = [updatedItem, ...remaining].slice(0, 50);
+
+      try {
+        localStorage.setItem("nexaplay_watch_history", JSON.stringify(nextList));
+      } catch {}
+
+      return nextList;
+    });
+
+    // Throttled sync to backend API (every 8 seconds or when completed)
+    const now = Date.now();
+    const lastSync = lastSyncTimeRef.current[video.id] || 0;
+    if (isCompleted || now - lastSync > 8000) {
+      lastSyncTimeRef.current[video.id] = now;
+      fetch("/api/history", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          videoId: video.id,
+          lastPositionSec: position,
+          completed: isCompleted,
+        }),
+      }).catch(() => {});
+    }
+  };
+
+  const handleRemoveWatchHistoryItem = (videoId: string) => {
+    setWatchHistory((prev) => {
+      const next = prev.filter((item) => item.videoId !== videoId);
+      try {
+        localStorage.setItem("nexaplay_watch_history", JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+    fetch(`/api/history/${videoId}`, { method: "DELETE" }).catch(() => {});
+  };
+
+  const handleClearWatchHistory = () => {
+    setWatchHistory([]);
+    try {
+      localStorage.removeItem("nexaplay_watch_history");
+    } catch {}
+    fetch("/api/history", { method: "DELETE" }).catch(() => {});
+  };
 
   const fetchCategories = async () => {
     try {
@@ -119,7 +218,17 @@ export default function App() {
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
-  const handleSelectVideo = (video: Video) => {
+  const handleSelectVideo = (video: Video, resumeTime?: number) => {
+    if (resumeTime !== undefined) {
+      setResumePosition(resumeTime);
+    } else {
+      const existing = watchHistory.find((item) => item.videoId === video.id);
+      if (existing && existing.lastPositionSec > 4 && !existing.completed) {
+        setResumePosition(existing.lastPositionSec);
+      } else {
+        setResumePosition(0);
+      }
+    }
     setSelectedVideo(video);
     setCurrentView("watch");
     window.history.replaceState(null, "", `/?v=${video.id}`);
@@ -167,6 +276,7 @@ export default function App() {
         currentUser={currentUser}
         onNavigate={handleNavigate}
         onSearch={handleSearch}
+        onSelectVideo={handleSelectVideo}
         onSwitchRole={handleSwitchRole}
         onOpenUpload={() => handleNavigate("creator-dashboard", "upload")}
         currentView={currentView}
@@ -179,6 +289,8 @@ export default function App() {
           <WatchPage
             video={selectedVideo}
             currentUser={currentUser}
+            initialResumePosition={resumePosition}
+            onProgressUpdate={handleUpdateWatchProgress}
             onSelectVideo={handleSelectVideo}
             onSaveToPlaylist={(vid) => setPlaylistVideo(vid)}
             onShare={(vid) => setShareVideo(vid)}
@@ -192,6 +304,7 @@ export default function App() {
           <HomePage
             videos={videos}
             categories={categories}
+            watchHistory={watchHistory}
             onSelectVideo={handleSelectVideo}
             onSelectCategory={handleSelectCategory}
             onSaveToPlaylist={(vid) => setPlaylistVideo(vid)}
@@ -269,6 +382,9 @@ export default function App() {
           <UserDashboard
             currentUser={currentUser}
             initialTab={viewParam || "history"}
+            watchHistory={watchHistory}
+            onRemoveHistoryItem={handleRemoveWatchHistoryItem}
+            onClearHistory={handleClearWatchHistory}
             onSelectVideo={handleSelectVideo}
           />
         )}

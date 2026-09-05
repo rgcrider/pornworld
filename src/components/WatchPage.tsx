@@ -21,21 +21,25 @@ import {
 interface WatchPageProps {
   video: Video;
   currentUser: User;
-  onSelectVideo: (video: Video) => void;
+  initialResumePosition?: number;
+  onSelectVideo: (video: Video, resumeTime?: number) => void;
   onSaveToPlaylist: (video: Video) => void;
   onShare: (video: Video) => void;
   onReport: (video: Video) => void;
   onTagClick: (tag: string) => void;
+  onProgressUpdate?: (video: Video, currentTime: number, duration: number) => void;
 }
 
 export const WatchPage: React.FC<WatchPageProps> = ({
   video,
   currentUser,
+  initialResumePosition = 0,
   onSelectVideo,
   onSaveToPlaylist,
   onShare,
   onReport,
   onTagClick,
+  onProgressUpdate,
 }) => {
   const [likesCount, setLikesCount] = useState(video.likesCount);
   const [dislikesCount, setDislikesCount] = useState(video.dislikesCount);
@@ -108,20 +112,25 @@ export const WatchPage: React.FC<WatchPageProps> = ({
     }
   };
 
+  const lastReportedTime = React.useRef(0);
+
   const handleVideoEnded = () => {
+    if (onProgressUpdate) {
+      onProgressUpdate(video, video.duration || 0, video.duration || 0);
+    }
     if (autoplayNext && relatedVideos.length > 0) {
       onSelectVideo(relatedVideos[0]);
     }
   };
 
-  const handleTimeUpdate = (currentTime: number) => {
-    // Periodically update progress every 15 seconds
-    if (Math.floor(currentTime) % 15 === 0 && Math.floor(currentTime) > 0) {
-      fetch("/api/user/history", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ videoId: video.id, progressSeconds: Math.floor(currentTime) }),
-      }).catch(() => {});
+  const handleTimeUpdate = (currentTime: number, duration: number) => {
+    const roundedTime = Math.floor(currentTime);
+    // Report whenever the second advances by at least 2 seconds or on start
+    if (Math.abs(roundedTime - lastReportedTime.current) >= 2 || (roundedTime > 0 && lastReportedTime.current === 0)) {
+      lastReportedTime.current = roundedTime;
+      if (onProgressUpdate) {
+        onProgressUpdate(video, currentTime, duration || video.duration || 0);
+      }
     }
   };
 
@@ -136,6 +145,7 @@ export const WatchPage: React.FC<WatchPageProps> = ({
             hlsManifestUrl={video.hlsManifestUrl}
             posterUrl={video.thumbnailUrl}
             title={video.title}
+            initialTime={initialResumePosition}
             onEnded={handleVideoEnded}
             onTimeUpdate={handleTimeUpdate}
             autoplay={true}

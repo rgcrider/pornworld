@@ -20,6 +20,7 @@ interface VideoPlayerProps {
   hlsManifestUrl?: string;
   posterUrl: string;
   title: string;
+  initialTime?: number;
   onEnded?: () => void;
   onTimeUpdate?: (currentTime: number, duration: number) => void;
   autoplay?: boolean;
@@ -30,12 +31,14 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   hlsManifestUrl,
   posterUrl,
   title,
+  initialTime = 0,
   onEnded,
   onTimeUpdate,
   autoplay = true,
 }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const initialTimeApplied = useRef(false);
 
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -56,6 +59,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
     let hls: Hls | null = null;
     const streamSource = hlsManifestUrl || playbackUrl;
+    initialTimeApplied.current = false;
 
     if (hlsManifestUrl && Hls.isSupported()) {
       hls = new Hls({
@@ -110,6 +114,10 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     const handleLoadedMetadata = () => {
       setDuration(video.duration || 0);
       video.volume = volume;
+      if (!initialTimeApplied.current && initialTime > 0 && initialTime < (video.duration || 0) - 2) {
+        video.currentTime = initialTime;
+        initialTimeApplied.current = true;
+      }
     };
     const handleEnded = () => {
       setIsPlaying(false);

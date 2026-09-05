@@ -198,3 +198,27 @@ export interface AdminDashboardStats {
   recentReports: VideoReport[];
   topCategories: { name: string; percentage: number }[];
 }
+
+export interface SearchSuggestionVideo {
+  id: string;
+  title: string;
+  thumbnailUrl: string;
+  duration: number;
+  channelName: string;
+  category: string;
+  viewsCount: number;
+  isHD?: boolean;
+  slug?: string;
+}
+
+export interface SearchSuggestionTag {
+  tag: string;
+  count: number;
+}
+
+export interface SearchSuggestionsData {
+  query: string;
+  videos: SearchSuggestionVideo[];
+  tags: SearchSuggestionTag[];
+  suggestions: string[];
+}
