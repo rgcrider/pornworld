@@ -1,0 +1,6 @@
+{
+  "name": "NexaPlay Video Streaming",
+  "description": "A high-performance, production-style video streaming platform with PeerTube federation, advanced search, dark-theme UI, creator tools, and content moderation.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

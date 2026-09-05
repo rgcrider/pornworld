@@ -1,0 +1,467 @@
+// NexaPlay Video Platform - Prisma ORM Schema
+// Production-grade video catalog schema supporting microservices, PeerTube federation, and high traffic
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  VISITOR
+  USER
+  CREATOR
+  MODERATOR
+  ADMIN
+}
+
+enum VideoStatus {
+  UPLOADING
+  PROCESSING
+  READY
+  REJECTED
+  FAILED
+  REMOVED
+}
+
+enum Visibility {
+  PUBLIC
+  UNLISTED
+  PRIVATE
+  AGE_RESTRICTED
+}
+
+enum ReportStatus {
+  PENDING
+  REVIEWING
+  RESOLVED
+  DISMISSED
+}
+
+enum ImportStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+model User {
+  id            String    @id @default(uuid())
+  email         String    @unique
+  username      String    @unique
+  passwordHash  String?
+  name          String?
+  avatar        String?
+  role          Role      @default(USER)
+  isVerified    Boolean   @default(false)
+  isBanned      Boolean   @default(false)
+  isAgeVerified Boolean   @default(false)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  profile       Profile?
+  creator       Creator?
+  comments      Comment[]
+  commentLikes  CommentLike[]
+  videoLikes    VideoLike[]
+  favorites     Favorite[]
+  playlists     Playlist[]
+  subscriptions Subscription[]
+  watchHistory  WatchHistory[]
+  videoViews    VideoView[]
+  reports       VideoReport[]
+  moderations   ModerationAction[]
+  notifications Notification[]
+
+  @@index([email])
+  @@index([username])
+  @@index([role])
+}
+
+model Profile {
+  id          String   @id @default(uuid())
+  userId      String   @unique
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bio         String?
+  country     String?
+  website     String?
+  bannerImage String?
+  preferences Json?    @default("{}")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model Creator {
+  id              String   @id @default(uuid())
+  userId          String   @unique
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  channelName     String   @unique
+  handle          String   @unique
+  avatar          String?
+  banner          String?
+  bio             String?
+  isVerified      Boolean  @default(false)
+  subscriberCount Int      @default(0)
+  totalViews      BigInt   @default(0)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  videos          Video[]
+  subscriptions   Subscription[]
+
+  @@index([channelName])
+  @@index([subscriberCount])
+}
+
+model Category {
+  id          String   @id @default(uuid())
+  name        String   @unique
+  slug        String   @unique
+  description String?
+  icon        String?
+  thumbnail   String?
+  orderIndex  Int      @default(0)
+  isVisible   Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  videos      Video[]
+
+  @@index([slug])
+  @@index([orderIndex])
+}
+
+model Tag {
+  id        String     @id @default(uuid())
+  name      String     @unique
+  slug      String     @unique
+  videoCount Int       @default(0)
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+
+  videos    VideoTag[]
+
+  @@index([slug])
+  @@index([videoCount])
+}
+
+model VideoTag {
+  id        String   @id @default(uuid())
+  videoId   String
+  video     Video    @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  tagId     String
+  tag       Tag      @relation(fields: [tagId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([videoId, tagId])
+  @@index([videoId])
+  @@index([tagId])
+}
+
+model Video {
+  id              String       @id @default(uuid())
+  title           String
+  slug            String       @unique
+  description     String?
+  duration        Int          @default(0) // in seconds
+  thumbnailUrl    String
+  previewGifUrl   String?
+  playbackUrl     String
+  hlsManifestUrl  String?
+  isHD            Boolean      @default(true)
+  resolution      String       @default("1080p")
+  viewsCount      BigInt       @default(0)
+  likesCount      Int          @default(0)
+  dislikesCount   Int          @default(0)
+  ratingScore     Float        @default(98.5)
+  isAgeRestricted Boolean      @default(false)
+  status          VideoStatus  @default(READY)
+  visibility      Visibility   @default(PUBLIC)
+  license         String       @default("Standard") // Creative Commons, PeerTube Open, Standard
+
+  // External federated sources (PeerTube, etc.)
+  externalId      String?
+  sourceProvider  String       @default("NexaPlay") // "PeerTube", "SelfHosted", "YouTubeEmbed"
+  sourceUrl       String?
+  embedUrl        String?
+
+  creatorId       String
+  creator         Creator      @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+  categoryId      String?
+  category        Category?    @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+
+  videoSources    VideoSource[]
+  tags            VideoTag[]
+  comments        Comment[]
+  likes           VideoLike[]
+  favorites       Favorite[]
+  playlistVideos  PlaylistVideo[]
+  watchHistories  WatchHistory[]
+  views           VideoView[]
+  reports         VideoReport[]
+
+  @@index([slug])
+  @@index([creatorId])
+  @@index([categoryId])
+  @@index([viewsCount])
+  @@index([createdAt])
+  @@index([status])
+  @@index([visibility])
+  @@index([ratingScore])
+}
+
+model VideoSource {
+  id          String   @id @default(uuid())
+  videoId     String
+  video       Video    @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  quality     String   // "1080p", "720p", "480p", "360p", "hls"
+  fileUrl     String
+  fileSize    BigInt   @default(0)
+  bitrate     Int?
+  codec       String?  @default("h264")
+  storageType String   @default("R2") // "R2", "S3", "SUPABASE"
+  createdAt   DateTime @default(now())
+
+  @@index([videoId])
+}
+
+model Comment {
+  id        String        @id @default(uuid())
+  content   String
+  videoId   String
+  video     Video         @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  parentId  String?
+  parent    Comment?      @relation("CommentReplies", fields: [parentId], references: [id], onDelete: Cascade)
+  replies   Comment[]     @relation("CommentReplies")
+  likesCount Int          @default(0)
+  isDeleted Boolean       @default(false)
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+
+  likes     CommentLike[]
+
+  @@index([videoId])
+  @@index([userId])
+  @@index([parentId])
+}
+
+model CommentLike {
+  id        String   @id @default(uuid())
+  commentId String
+  comment   Comment  @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([commentId, userId])
+}
+
+model VideoLike {
+  id        String   @id @default(uuid())
+  videoId   String
+  video     Video    @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  isLike    Boolean  @default(true) // true for like, false for dislike
+  createdAt DateTime @default(now())
+
+  @@unique([videoId, userId])
+  @@index([videoId])
+  @@index([userId])
+}
+
+model Favorite {
+  id        String   @id @default(uuid())
+  videoId   String
+  video     Video    @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([videoId, userId])
+  @@index([userId])
+}
+
+model Playlist {
+  id          String          @id @default(uuid())
+  name        String
+  description String?
+  isPublic    Boolean         @default(false)
+  userId      String
+  user        User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+
+  videos      PlaylistVideo[]
+
+  @@index([userId])
+}
+
+model PlaylistVideo {
+  id         String   @id @default(uuid())
+  playlistId String
+  playlist   Playlist @relation(fields: [playlistId], references: [id], onDelete: Cascade)
+  videoId    String
+  video      Video    @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  position   Int      @default(0)
+  createdAt  DateTime @default(now())
+
+  @@unique([playlistId, videoId])
+  @@index([playlistId])
+}
+
+model Subscription {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  creatorId String
+  creator   Creator  @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([userId, creatorId])
+  @@index([userId])
+  @@index([creatorId])
+}
+
+model WatchHistory {
+  id             String   @id @default(uuid())
+  userId         String
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  videoId        String
+  video          Video    @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  lastPositionSec Int     @default(0)
+  completed      Boolean  @default(false)
+  updatedAt      DateTime @updatedAt
+  createdAt      DateTime @default(now())
+
+  @@unique([userId, videoId])
+  @@index([userId])
+  @@index([updatedAt])
+}
+
+model VideoView {
+  id        String   @id @default(uuid())
+  videoId   String
+  video     Video    @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  ipAddress String?
+  userAgent String?
+  watchSec  Int      @default(0)
+  country   String?
+  createdAt DateTime @default(now())
+
+  @@index([videoId])
+  @@index([createdAt])
+}
+
+model VideoReport {
+  id          String       @id @default(uuid())
+  videoId     String
+  video       Video        @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  reporterId  String
+  reporter    User         @relation(fields: [reporterId], references: [id], onDelete: Cascade)
+  reason      String       // "Inappropriate Content", "Copyright Violation", "Spam", "Illegal Content", "Other"
+  details     String?
+  status      ReportStatus @default(PENDING)
+  moderatorId String?
+  moderatorNote String?
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  @@index([videoId])
+  @@index([status])
+}
+
+model ImportSource {
+  id              String      @id @default(uuid())
+  name            String
+  type            String      @default("PeerTube") // "PeerTube", "RSS", "Direct"
+  instanceUrl     String
+  apiUrl          String
+  isEnabled       Boolean     @default(true)
+  allowedCategories String[]  @default([])
+  allowedLicenses String[]    @default(["Attribution", "CC0", "Open"])
+  importFrequency String      @default("hourly")
+  lastSyncAt      DateTime?
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  importJobs      ImportJob[]
+
+  @@index([instanceUrl])
+}
+
+model ImportJob {
+  id          String       @id @default(uuid())
+  sourceId    String
+  source      ImportSource @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  status      ImportStatus @default(PENDING)
+  videosFound Int          @default(0)
+  importedCount Int        @default(0)
+  errorMessage String?
+  createdAt   DateTime     @default(now())
+  completedAt DateTime?
+
+  @@index([sourceId])
+}
+
+model ModerationAction {
+  id          String   @id @default(uuid())
+  moderatorId String
+  moderator   User     @relation(fields: [moderatorId], references: [id], onDelete: Cascade)
+  targetType  String   // "VIDEO", "COMMENT", "USER"
+  targetId    String
+  action      String   // "APPROVE", "REMOVE", "AGE_RESTRICT", "BAN_USER"
+  reason      String
+  ipAddress   String?
+  createdAt   DateTime @default(now())
+
+  @@index([moderatorId])
+  @@index([createdAt])
+}
+
+model Notification {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title     String
+  message   String
+  link      String?
+  isRead    Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+model Advertisement {
+  id          String   @id @default(uuid())
+  title       String
+  placement   String   // "HEADER", "PLAYER_PRE_ROLL", "SIDEBAR", "BETWEEN_GRID", "FOOTER"
+  imageUrl    String?
+  targetUrl   String?
+  codeSnippet String?
+  impressions BigInt   @default(0)
+  clicks      BigInt   @default(0)
+  isEnabled   Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([placement])
+}
+
+model SiteSetting {
+  id          String   @id @default(uuid())
+  key         String   @unique
+  value       String
+  description String?
+  updatedAt   DateTime @updatedAt
+}
